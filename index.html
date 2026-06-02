@@ -258,6 +258,48 @@
         <p class="state-label">State: <span class="state state-done">Persisted</span></p>
       </article>
       </section>
+
+      <!-- Full schema reference — job_runs columns written at the current step are highlighted -->
+      <div class="lc-schema">
+        <div class="lc-schema-head">The two tables behind every run
+          <span>— the <code>job_runs</code> column(s) written at the current step light up</span>
+        </div>
+        <div class="model-grid">
+          <div class="entity">
+            <div class="entity-head">jobs <span>(static definition · written once)</span></div>
+            <table class="schema">
+              <tr><td class="k">id</td><td class="t">UUID</td><td class="d">primary key</td></tr>
+              <tr><td class="k">name</td><td class="t">string</td><td class="d">human label</td></tr>
+              <tr><td class="k">type</td><td class="t">string</td><td class="d">which action to run</td></tr>
+              <tr><td class="k">schedule</td><td class="t">string</td><td class="d">cron / trigger</td></tr>
+              <tr><td class="k">dag_definition</td><td class="t">JSON</td><td class="d">task graph / deps</td></tr>
+              <tr><td class="k">retry_policy</td><td class="t">JSON</td><td class="d">max_attempts + backoff</td></tr>
+              <tr><td class="k">resource_reqs</td><td class="t">JSON</td><td class="d">cpu / mem / queue</td></tr>
+              <tr><td class="k">owner</td><td class="t">string</td><td class="d">tenant / team</td></tr>
+              <tr><td class="k">enabled</td><td class="t">bool</td><td class="d">pause / resume</td></tr>
+              <tr><td class="k">created_at</td><td class="t">timestamp</td><td class="d">audit</td></tr>
+            </table>
+          </div>
+          <div class="entity">
+            <div class="entity-head">job_runs <span>(this run · updated each step) &nbsp;FK→jobs.id</span></div>
+            <table class="schema lc-runs">
+              <tr class="col-id"><td class="k">id</td><td class="t">UUID</td><td class="d">run primary key</td></tr>
+              <tr class="col-jobid"><td class="k">job_id</td><td class="t">UUID</td><td class="d">FK → jobs</td></tr>
+              <tr class="col-idem"><td class="k">idempotency_key</td><td class="t">string</td><td class="d">unique — dedupes the run</td></tr>
+              <tr class="col-status"><td class="k">status</td><td class="t">enum</td><td class="d">created·scheduled·queued·running·completed·failed</td></tr>
+              <tr class="col-attempt"><td class="k">attempt</td><td class="t">int</td><td class="d">retry counter</td></tr>
+              <tr class="col-runat"><td class="k">run_at</td><td class="t">timestamp</td><td class="d">earliest execution time</td></tr>
+              <tr class="col-worker"><td class="k">worker_id</td><td class="t">string</td><td class="d">worker that leased it</td></tr>
+              <tr class="col-lease"><td class="k">lease_expires_at</td><td class="t">timestamp</td><td class="d">when others may steal it</td></tr>
+              <tr class="col-started"><td class="k">started_at</td><td class="t">timestamp</td><td class="d">execution start</td></tr>
+              <tr class="col-finished"><td class="k">finished_at</td><td class="t">timestamp</td><td class="d">execution end</td></tr>
+              <tr class="col-output"><td class="k">output_ref</td><td class="t">string</td><td class="d">logs / result location</td></tr>
+              <tr class="col-error"><td class="k">last_error</td><td class="t">text</td><td class="d">failure metadata</td></tr>
+              <tr class="col-updated"><td class="k">updated_at</td><td class="t">timestamp</td><td class="d">stamped on every transition</td></tr>
+            </table>
+          </div>
+        </div>
+      </div>
     </figure>
 
     <!-- ============ WHY NOT JUST THE QUEUE (foldable class question) ============ -->

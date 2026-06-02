@@ -163,7 +163,63 @@ body {
 .step-pill:hover { border-color: var(--accent); }
 
 /* ============ CARDS ============ */
-.cards { position: relative; min-height: 420px; }
+.cards { position: relative; min-height: 360px; }
+
+/* ---- Lifecycle schema reference (inside the widget, below the cards) ---- */
+.lc-schema { margin-top: 8px; }
+.lc-schema-head {
+  font-size: 0.74rem;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 12px;
+}
+.lc-schema-head span { color: var(--muted); font-weight: 500; text-transform: none; letter-spacing: 0; }
+.lc-schema .entity { background: var(--bg); }
+.lc-runs tr { transition: background 0.35s ease, box-shadow 0.35s ease; }
+.lc-runs tr .k { transition: color 0.35s ease; }
+
+/* Highlight the job_runs column(s) written at the current step */
+.anim.lifecycle[data-step="0"] .lc-runs .col-id,
+.anim.lifecycle[data-step="0"] .lc-runs .col-jobid,
+.anim.lifecycle[data-step="0"] .lc-runs .col-idem,
+.anim.lifecycle[data-step="0"] .lc-runs .col-status,
+.anim.lifecycle[data-step="0"] .lc-runs .col-attempt,
+.anim.lifecycle[data-step="0"] .lc-runs .col-runat,
+.anim.lifecycle[data-step="1"] .lc-runs .col-status,
+.anim.lifecycle[data-step="2"] .lc-runs .col-status,
+.anim.lifecycle[data-step="3"] .lc-runs .col-status,
+.anim.lifecycle[data-step="3"] .lc-runs .col-worker,
+.anim.lifecycle[data-step="3"] .lc-runs .col-lease,
+.anim.lifecycle[data-step="3"] .lc-runs .col-started,
+.anim.lifecycle[data-step="4"] .lc-runs .col-status,
+.anim.lifecycle[data-step="4"] .lc-runs .col-finished,
+.anim.lifecycle[data-step="4"] .lc-runs .col-output,
+.anim.lifecycle[data-step="4"] .lc-runs .col-error,
+.anim.lifecycle[data-step="5"] .lc-runs .col-updated {
+  background: rgba(56, 189, 248, 0.14);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.anim.lifecycle[data-step="0"] .lc-runs .col-id .k,
+.anim.lifecycle[data-step="0"] .lc-runs .col-jobid .k,
+.anim.lifecycle[data-step="0"] .lc-runs .col-idem .k,
+.anim.lifecycle[data-step="0"] .lc-runs .col-status .k,
+.anim.lifecycle[data-step="0"] .lc-runs .col-attempt .k,
+.anim.lifecycle[data-step="0"] .lc-runs .col-runat .k,
+.anim.lifecycle[data-step="1"] .lc-runs .col-status .k,
+.anim.lifecycle[data-step="2"] .lc-runs .col-status .k,
+.anim.lifecycle[data-step="3"] .lc-runs .col-status .k,
+.anim.lifecycle[data-step="3"] .lc-runs .col-worker .k,
+.anim.lifecycle[data-step="3"] .lc-runs .col-lease .k,
+.anim.lifecycle[data-step="3"] .lc-runs .col-started .k,
+.anim.lifecycle[data-step="4"] .lc-runs .col-status .k,
+.anim.lifecycle[data-step="4"] .lc-runs .col-finished .k,
+.anim.lifecycle[data-step="4"] .lc-runs .col-output .k,
+.anim.lifecycle[data-step="4"] .lc-runs .col-error .k,
+.anim.lifecycle[data-step="5"] .lc-runs .col-updated .k {
+  color: var(--accent);
+}
 .card {
   position: absolute;
   inset: 0;
