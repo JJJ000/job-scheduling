@@ -1,0 +1,957 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>How Job Scheduling Works — Step by Step</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header class="page-header">
+    <h1>How Job Scheduling Works</h1>
+    <p class="subtitle">
+      A step-by-step walkthrough of a job's life — from the moment it is
+      created, into the queue, and through to its action.
+    </p>
+  </header>
+
+  <section class="usecases" aria-label="Real-world use cases">
+    <div class="usecases-title">Where job scheduling shows up</div>
+    <ul class="usecase-list">
+      <li><span class="uc-co">OpenAI</span>CI/CD (GitHub Actions) · Design Sora · Crossword Puzzle</li>
+      <li><span class="uc-co">Anthropic</span>Distributed Model Deployment</li>
+      <li><span class="uc-co">Meta</span>Web crawler</li>
+      <li><span class="uc-co">Stripe</span>Webhook delivery</li>
+      <li><span class="uc-co">Roblox</span>Delayed Payment</li>
+    </ul>
+  </section>
+
+  <main class="layout">
+    <!-- ============ CHAPTER 1 ============ -->
+    <header class="chapter first">
+      <div class="chapter-kicker">Part 1</div>
+      <div class="chapter-name">Orchestration</div>
+      <p class="chapter-desc">
+        How a job is defined, triggered, scheduled, and moved through the
+        system — from creation to action.
+      </p>
+    </header>
+
+    <!-- ============ SYSTEM DESIGN DIAGRAM ============ -->
+    <section class="section" style="margin-top:0;">
+      <h2 class="section-title">System Design</h2>
+      <p class="section-lead">
+        Triggers (<strong>API</strong>, <strong>cron</strong>, or
+        <strong>events</strong>) feed the <strong>Scheduler</strong>, which
+        records each run in the <strong>Job Metadata Store</strong> and
+        pushes work to the <strong>Job Queue</strong>. The
+        <strong>Worker Pool</strong> consumes the queue and writes outcomes
+        to the <strong>Result Store</strong>.
+      </p>
+
+      <div class="sd-wrap">
+        <svg class="sd-svg" viewBox="0 0 780 330" role="img"
+             aria-label="System design: API, Cron Trigger and Event Handler feed the Scheduler, which writes to the Job Metadata Store and pushes to the Job Queue; the Job Queue feeds the Worker Pool, which writes to the Result Store.">
+          <defs>
+            <marker id="sd-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+                    markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+              <path d="M0,0 L10,5 L0,10 z" class="sd-head" />
+            </marker>
+          </defs>
+
+          <!-- ── Trigger inputs ── -->
+          <text x="58"  y="40"  class="sd-in">API</text>
+          <line x1="8"  y1="50"  x2="146" y2="50"  class="sd-line" marker-end="url(#sd-arrow)" />
+
+          <text x="48"  y="96"  class="sd-in">Cron Trigger</text>
+          <line x1="8"  y1="106" x2="146" y2="106" class="sd-line" marker-end="url(#sd-arrow)" />
+
+          <text x="42"  y="152" class="sd-in">Event Handler</text>
+          <line x1="8"  y1="162" x2="146" y2="162" class="sd-line" marker-end="url(#sd-arrow)" />
+
+          <!-- ── Scheduler ── -->
+          <rect x="152" y="40" width="150" height="135" rx="20" class="sd-box" />
+          <text x="227" y="113" class="sd-label">Scheduler</text>
+
+          <!-- Scheduler → Job Queue -->
+          <line x1="302" y1="107" x2="426" y2="107" class="sd-line" marker-end="url(#sd-arrow)" />
+
+          <!-- Scheduler → Job Metadata Store -->
+          <line x1="212" y1="175" x2="190" y2="222" class="sd-line" marker-end="url(#sd-arrow)" />
+
+          <!-- ── Job Queue ── -->
+          <rect x="434" y="78" width="320" height="58" rx="29" class="sd-box queue" />
+          <text x="594" y="112" class="sd-label">Job Queue</text>
+
+          <!-- Job Queue → Worker Pool -->
+          <line x1="594" y1="136" x2="594" y2="242" class="sd-line" marker-end="url(#sd-arrow)" />
+
+          <!-- ── Worker Pool ── -->
+          <rect x="434" y="250" width="320" height="58" rx="29" class="sd-box worker" />
+          <text x="594" y="284" class="sd-label">Worker Pool</text>
+
+          <!-- Worker Pool → Result Store -->
+          <line x1="434" y1="279" x2="350" y2="279" class="sd-line" marker-end="url(#sd-arrow)" />
+
+          <!-- ── Job Metadata Store ── -->
+          <circle cx="185" cy="272" r="52" class="sd-circle store" />
+          <text x="185" y="262" class="sd-label sm">Job</text>
+          <text x="185" y="278" class="sd-label sm">Metadata</text>
+          <text x="185" y="294" class="sd-label sm">Store</text>
+
+          <!-- ── Result Store ── -->
+          <circle cx="305" cy="279" r="45" class="sd-circle result" />
+          <text x="305" y="275" class="sd-label sm">Result</text>
+          <text x="305" y="291" class="sd-label sm">Store</text>
+        </svg>
+      </div>
+    </section>
+
+    <!-- ============ LIFECYCLE MANAGEMENT ============ -->
+    <h2 class="section-title walkthrough-title">Lifecycle Management</h2>
+    <p class="section-lead" style="max-width:780px;">
+      One <code>job_runs</code> row moves through six states. Watch the flow,
+      then step through each transition — and see exactly how the durable row
+      is written at every stage (the queue is just transport; this row is the
+      source of truth).
+    </p>
+
+    <!-- One widget: animation + step pills + explanation cards, all driven by the same step -->
+    <figure class="anim lifecycle flow" data-step="0" data-steps="6" aria-label="Animated job lifecycle — flow, step, and the database write at each stage">
+      <div class="anim-title">▶ Watch a job move through its lifecycle</div>
+      <div class="anim-stage flow-stage">
+        <div class="fl-track"></div>
+        <div class="fl-vtrack"></div>
+        <div class="a-box fl-node" data-n="trigger">Trigger</div>
+        <div class="a-box fl-node" data-n="scheduler">Scheduler</div>
+        <div class="a-box fl-node" data-n="queue">Queue</div>
+        <div class="a-box fl-node" data-n="worker">Worker</div>
+        <div class="a-box fl-node" data-n="result">Result</div>
+        <div class="a-box fl-meta">Metadata Store</div>
+        <div class="a-token fl-token">JOB</div>
+      </div>
+      <div class="anim-controls">
+        <button type="button" data-act="toggle">▶ Play</button>
+        <button type="button" data-act="step">⏭ Step</button>
+        <button type="button" data-act="replay">↻ Replay</button>
+      </div>
+
+      <!-- Step pills: also jump the animation + card to that step -->
+      <nav class="stepper" aria-label="Lifecycle steps and the state each produces">
+        <button type="button" class="step-pill" data-act="goto" data-to="0"><span class="sp-n">1</span><span class="sp-act">Create</span><span class="sp-state state-created">created</span></button>
+        <button type="button" class="step-pill" data-act="goto" data-to="1"><span class="sp-n">2</span><span class="sp-act">Schedule</span><span class="sp-state state-scheduled">scheduled</span></button>
+        <button type="button" class="step-pill" data-act="goto" data-to="2"><span class="sp-n">3</span><span class="sp-act">Enqueue</span><span class="sp-state state-queued">queued</span></button>
+        <button type="button" class="step-pill" data-act="goto" data-to="3"><span class="sp-n">4</span><span class="sp-act">Execute</span><span class="sp-state state-running">running</span></button>
+        <button type="button" class="step-pill" data-act="goto" data-to="4"><span class="sp-n">5</span><span class="sp-act">Complete</span><span class="sp-state state-done">completed</span></button>
+        <button type="button" class="step-pill" data-act="goto" data-to="5"><span class="sp-n">6</span><span class="sp-act">Persist</span><span class="sp-state state-done">persisted</span></button>
+      </nav>
+
+      <!-- Explanation cards: the active one matches the current step -->
+      <section class="cards">
+      <article class="card card-1">
+        <h2><span class="badge">1</span> Job is created</h2>
+        <p>
+          A <strong>producer</strong> — an application, an API call, or a
+          cron trigger — creates a job. The job is just a small message:
+          <em>what</em> to do (the task type), its <em>payload</em>
+          (arguments), and metadata such as priority, a unique
+          <strong>idempotency key</strong>, and an optional
+          <em>run-at</em> time.
+        </p>
+        <div class="db-update">
+          <span class="db-op insert">INSERT job_runs</span>
+          <span class="col"><span class="cf">status</span><span class="cv">'created'</span></span>
+          <span class="col"><span class="cf">attempt</span><span class="cv">0</span></span>
+          <span class="col plain">+ id · job_id · idempotency_key · run_at</span>
+        </div>
+        <p class="state-label">State: <span class="state state-created">Created</span></p>
+      </article>
+
+      <article class="card card-2">
+        <h2><span class="badge">2</span> Scheduler decides when</h2>
+        <p>
+          The <strong>scheduler</strong> inspects the job's
+          <em>run-at</em> time. Immediate jobs pass straight through;
+          <strong>delayed</strong> or <strong>recurring</strong> jobs are
+          held until their time arrives. This is what lets you say
+          “run this in 2 hours” or “run every night at midnight.”
+        </p>
+        <div class="db-update">
+          <span class="db-op update">UPDATE job_runs</span>
+          <span class="col"><span class="cf">status</span><span class="cv">'scheduled'</span></span>
+          <span class="col plain">WHERE run_at ≤ now()</span>
+        </div>
+        <p class="state-label">State: <span class="state state-scheduled">Scheduled</span></p>
+      </article>
+
+      <article class="card card-3">
+        <h2><span class="badge">3</span> Pushed into the queue</h2>
+        <p>
+          When it's time to run, the job is placed on a durable
+          <strong>job queue</strong> (e.g. Redis, SQS, Kafka). The queue
+          decouples producers from workers: producers never wait, and
+          jobs buffer safely if workers are busy. Priority and FIFO
+          ordering are enforced here.
+        </p>
+        <div class="db-update">
+          <span class="db-op update">UPDATE job_runs</span>
+          <span class="col"><span class="cf">status</span><span class="cv">'queued'</span></span>
+          <span class="col plain">after publishing {job_run_id} to the broker</span>
+        </div>
+        <p class="state-label">State: <span class="state state-queued">Queued</span></p>
+      </article>
+
+      <article class="card card-4">
+        <h2><span class="badge">4</span> A worker executes it</h2>
+        <p>
+          A pool of <strong>workers</strong> pulls jobs off the queue and
+          runs the actual <strong>action</strong>. The job is
+          <em>leased</em> (made invisible to others) while it runs.
+          If a worker crashes, the lease expires and the job becomes
+          visible again. Failures trigger <strong>retries</strong> with
+          backoff; exhausted retries go to a <strong>dead-letter queue</strong>.
+        </p>
+        <div class="db-update">
+          <span class="db-op update">UPDATE job_runs</span>
+          <span class="col"><span class="cf">status</span><span class="cv">'running'</span></span>
+          <span class="col"><span class="cf">worker_id</span><span class="cv">:me</span></span>
+          <span class="col"><span class="cf">claimed_at</span><span class="cv">now()</span></span>
+          <span class="col"><span class="cf">lease_expires_at</span><span class="cv">now()+lease</span></span>
+          <span class="col"><span class="cf">started_at</span><span class="cv">now()</span></span>
+        </div>
+        <p class="state-label">State: <span class="state state-running">Running</span></p>
+      </article>
+
+      <article class="card card-5">
+        <h2><span class="badge">5</span> Action completes</h2>
+        <p>
+          On success the worker <strong>acknowledges</strong> the job,
+          removing it from the queue so it can't run twice. The result
+          (or side effect) is committed. Because each job carries an
+          idempotency key, accidental re-delivery is safe — the same
+          job won't produce duplicate effects.
+        </p>
+        <div class="db-update">
+          <span class="db-op update">UPDATE job_runs</span>
+          <span class="col"><span class="cf">status</span><span class="cv">'completed'</span></span>
+          <span class="col"><span class="cf">finished_at</span><span class="cv">now()</span></span>
+          <span class="col"><span class="cf">output_ref</span><span class="cv">…</span></span>
+          <span class="col plain">on failure → attempt+=1, last_error, status='failed'/re-queue/DLQ</span>
+        </div>
+        <p class="state-label">State: <span class="state state-done">Completed</span></p>
+      </article>
+
+      <article class="card card-6">
+        <h2><span class="badge">6</span> State is persisted</h2>
+        <p>
+          Throughout the whole journey a <strong>datastore</strong>
+          records every transition — created, scheduled, queued, running,
+          completed, or failed. This gives you durability across
+          restarts, an audit trail, retry bookkeeping, and a place to
+          query “what is the status of my job?”
+        </p>
+        <div class="db-update">
+          <span class="db-op audit">EVERY TXN</span>
+          <span class="col"><span class="cf">updated_at</span><span class="cv">now()</span></span>
+          <span class="col plain">durable audit trail — the row, not the queue, is the source of truth</span>
+        </div>
+        <p class="state-label">State: <span class="state state-done">Persisted</span></p>
+      </article>
+      </section>
+    </figure>
+
+    <!-- ============ WHY NOT JUST THE QUEUE (foldable class question) ============ -->
+    <details class="section foldable">
+      <summary class="fold-summary">
+        <span class="q-badge">Debate</span>
+        <span class="q-text">
+          Your teammate says: <em>"The queue already stores messages durably —
+          why bother with a separate database?"</em> What can go
+          <strong>wrong</strong> if the queue is your only source of truth?
+        </span>
+        <span class="fold-chevron" aria-hidden="true">▸</span>
+      </summary>
+      <div class="fold-body">
+      <h2 class="section-title">Why Not Just Keep Everything in the Queue?</h2>
+      <p class="section-lead">
+        A queue is a great <em>delivery</em> mechanism — but a poor
+        <em>system of record</em>. Leaning on it for durability invites
+        whole classes of failure.
+      </p>
+
+      <div class="two-col">
+        <div class="callout danger">
+          <div class="callout-head">⚠️ Failure cases</div>
+          <ul>
+            <li>Queues are optimized for <strong>delivery, not durability</strong></li>
+            <li>Messages can be <strong>lost, duplicated, or expire</strong> during outages</li>
+            <li>Retries and failovers create <strong>inconsistent execution state</strong></li>
+            <li>Hard to <strong>recover scheduler state</strong> after a crash</li>
+          </ul>
+        </div>
+        <div class="callout good">
+          <div class="callout-head">✅ Architectural principle</div>
+          <ul>
+            <li>Keep an offline <strong>Job Metadata Store</strong> as the single source of truth</li>
+            <li>The queue is a <strong>transient delivery mechanism</strong>, not the record</li>
+            <li>Workers <strong>reconstruct state</strong> from durable metadata</li>
+            <li>Enables <strong>replay, recovery, auditing, and exactly-once</strong> coordination</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="principle-banner">
+        Queue = transient transport &nbsp;·&nbsp; Metadata Store = durable truth
+      </div>
+      </div>
+    </details>
+
+    <!-- ============ JOB vs JOB RUN (foldable class question) ============ -->
+    <details class="section foldable">
+      <summary class="fold-summary">
+        <span class="q-badge">Discuss</span>
+        <span class="q-text">
+          A nightly report job fails halfway through on Tuesday, succeeds on
+          Wednesday, and is retried 3 times on Thursday. What are the
+          <strong>core entities</strong> you'd model — and where does each piece
+          of state live?
+        </span>
+        <span class="fold-chevron" aria-hidden="true">▸</span>
+      </summary>
+      <div class="fold-body">
+      <h2 class="section-title">Core Entities: Job vs Job Run</h2>
+      <p class="section-lead">
+        This separation is not just semantic — it is a fundamental
+        architectural boundary. The <strong>Job</strong> is the static
+        definition; a <strong>Job Run</strong> is one execution of it.
+      </p>
+
+      <div class="two-col">
+        <div class="entity-card def">
+          <div class="entity-card-head">📘 Job <span>static definition</span></div>
+          <ul>
+            <li>Schedule / trigger</li>
+            <li>DAG definition</li>
+            <li>Retry policy</li>
+            <li>Owner / tenant metadata</li>
+            <li>Resource requirements</li>
+          </ul>
+        </div>
+        <div class="entity-arrow" aria-hidden="true">
+          <span>1 ──▶ N</span>
+        </div>
+        <div class="entity-card run">
+          <div class="entity-card-head">🏃 Job Run <span>one execution instance</span></div>
+          <ul>
+            <li>Execution status</li>
+            <li>Retry attempts</li>
+            <li>Worker assignment</li>
+            <li>Logs / outputs</li>
+            <li>Timing &amp; failure metadata</li>
+          </ul>
+        </div>
+      </div>
+
+      <h3 class="flow-title">Why this separation matters</h3>
+      <div class="why-grid">
+        <div class="why">Track retries &amp; failures <strong>independently per run</strong></div>
+        <div class="why">Durable <strong>audit history</strong> of every execution</div>
+        <div class="why">Scales cleanly — Jobs are static, <strong>Runs drive the traffic</strong></div>
+        <div class="why">Efficient <strong>partitioning, retention &amp; observability</strong> at scale</div>
+      </div>
+      </div>
+    </details>
+
+    <!-- ============ DATA MODEL (foldable class question) ============ -->
+    <details class="section foldable">
+      <summary class="fold-summary">
+        <span class="q-badge">Design it</span>
+        <span class="q-text">
+          Sketch the <strong>database tables</strong> for this scheduler. Which
+          columns does each need, what's the primary key, and how do you make a
+          job <strong>idempotent</strong> and recoverable after a worker crash?
+        </span>
+        <span class="fold-chevron" aria-hidden="true">▸</span>
+      </summary>
+      <div class="fold-body">
+      <h2 class="section-title">Data Model</h2>
+      <p class="section-lead">
+        Two shapes carry the data: the durable <strong>job record</strong>
+        in the store, and the lightweight <strong>message</strong> that
+        rides the queue.
+      </p>
+
+      <div class="model-grid">
+        <!-- jobs (definition) -->
+        <div class="entity">
+          <div class="entity-head">jobs <span>(static definition · low write)</span></div>
+          <table class="schema">
+            <tr><td class="k">id</td><td class="t">UUID</td><td class="d">primary key</td></tr>
+            <tr><td class="k">name</td><td class="t">string</td><td class="d">human label</td></tr>
+            <tr><td class="k">type</td><td class="t">string</td><td class="d">which action to run</td></tr>
+            <tr><td class="k">schedule</td><td class="t">string</td><td class="d">cron / trigger, e.g. <code>0 0 * * *</code></td></tr>
+            <tr><td class="k">dag_definition</td><td class="t">JSON</td><td class="d">task graph / dependencies</td></tr>
+            <tr><td class="k">retry_policy</td><td class="t">JSON</td><td class="d">max_attempts + backoff</td></tr>
+            <tr><td class="k">resource_reqs</td><td class="t">JSON</td><td class="d">cpu / mem / queue</td></tr>
+            <tr><td class="k">owner</td><td class="t">string</td><td class="d">tenant / team metadata</td></tr>
+            <tr><td class="k">enabled</td><td class="t">bool</td><td class="d">pause / resume</td></tr>
+            <tr><td class="k">created_at</td><td class="t">timestamp</td><td class="d">audit</td></tr>
+          </table>
+        </div>
+
+        <!-- job_runs (execution) -->
+        <div class="entity">
+          <div class="entity-head">job_runs <span>(execution instance · high write) &nbsp;FK→jobs.id</span></div>
+          <table class="schema">
+            <tr><td class="k">id</td><td class="t">UUID</td><td class="d">primary key</td></tr>
+            <tr><td class="k">job_id</td><td class="t">UUID</td><td class="d">FK → jobs (the definition)</td></tr>
+            <tr><td class="k">idempotency_key</td><td class="t">string</td><td class="d">unique — dedupes a run</td></tr>
+            <tr><td class="k">status</td><td class="t">enum</td><td class="d">created · scheduled · queued · running · completed · failed</td></tr>
+            <tr><td class="k">attempt</td><td class="t">int</td><td class="d">retry counter for this run</td></tr>
+            <tr><td class="k">run_at</td><td class="t">timestamp</td><td class="d">earliest execution time</td></tr>
+            <tr><td class="k">worker_id</td><td class="t">string</td><td class="d">worker assignment / lease</td></tr>
+            <tr><td class="k">lease_expires_at</td><td class="t">timestamp</td><td class="d">when lock auto-releases</td></tr>
+            <tr><td class="k">started_at</td><td class="t">timestamp</td><td class="d">timing</td></tr>
+            <tr><td class="k">finished_at</td><td class="t">timestamp</td><td class="d">timing</td></tr>
+            <tr><td class="k">output_ref</td><td class="t">string</td><td class="d">logs / result location</td></tr>
+            <tr><td class="k">last_error</td><td class="t">text</td><td class="d">failure metadata</td></tr>
+            <tr><td class="k">updated_at</td><td class="t">timestamp</td><td class="d">audit / state trail</td></tr>
+          </table>
+        </div>
+      </div>
+
+      <!-- queue message rides the wire -->
+      <div class="entity" style="margin-bottom:26px;">
+        <div class="entity-head">queue message <span>(transient — points back at the durable run)</span></div>
+        <pre class="code">{
+  "job_run_id": "9f1c…",   // resolve full state from job_runs
+  "job_id":     "a3e7…",   // the definition it belongs to
+  "type":       "send_email",
+  "attempt":    1,
+  "enqueued_at":"2026-06-02T10:00Z"
+}</pre>
+      </div>
+
+      <!-- data flow sequence -->
+      <h3 class="flow-title">How the data flows</h3>
+      <ol class="flow-steps">
+        <li><span class="fnum">1</span>The <code>jobs</code> definition already exists. When a trigger fires, <strong>INSERT</strong> a <code>job_runs</code> row with <code>status=created</code> (its idempotency key dedupes the run).</li>
+        <li><span class="fnum">2</span>Scheduler <strong>SELECTs</strong> runs where <code>run_at ≤ now AND status=scheduled</code>, then publishes a message carrying only the <code>job_run_id</code>.</li>
+        <li><span class="fnum">3</span>Broker holds the message; the run row flips to <code>queued</code>. The queue is transient — the <code>job_runs</code> store stays the source of truth.</li>
+        <li><span class="fnum">4</span>A worker pulls the message, <strong>rehydrates</strong> the run from the store, then <strong>leases</strong> it (<code>UPDATE … SET status=running, worker_id=me, lease_expires_at=…</code>) and runs the action.</li>
+        <li><span class="fnum">5</span>Success → <code>ack</code> + <code>UPDATE status=completed</code>. Failure → bump <code>attempt</code>; re-queue with backoff or route to DLQ once <code>attempt ≥ retry_policy.max_attempts</code>.</li>
+        <li><span class="fnum">6</span>Every transition writes <code>updated_at</code> on the run — durable audit trail, crash recovery, and queryable status, independent of the queue.</li>
+      </ol>
+      </div>
+    </details>
+
+    <!-- ============ CHAPTER 2 ============ -->
+    <header class="chapter">
+      <div class="chapter-kicker">Part 2</div>
+      <div class="chapter-name">Delivery Semantics</div>
+      <p class="chapter-desc">
+        Once a job is running, how hard do we try to deliver it — and how do
+        we avoid losing or duplicating work? Retries, backoff, and idempotency.
+      </p>
+    </header>
+
+    <!-- ============ DELIVERY SEMANTICS ============ -->
+    <section class="section" style="margin-top:0;">
+      <p class="section-lead">
+        Every scheduler must choose how hard it tries to deliver a job.
+        The three classic guarantees trade off lost work against duplicate work.
+      </p>
+
+      <div class="semantics-chips">
+        <div class="sem-chip">
+          <div class="sem-name">At-Most-Once</div>
+          <div class="sem-sub">Fire &amp; forget — may <strong>lose</strong> work, never duplicates</div>
+        </div>
+        <div class="sem-chip mid">
+          <div class="sem-name">At-Least-Once <span>(Retry)</span></div>
+          <div class="sem-sub">Always retried — never lost, but may <strong>duplicate</strong></div>
+        </div>
+        <div class="sem-chip strong">
+          <div class="sem-name">Exactly-Once <span>(Idempotency)</span></div>
+          <div class="sem-sub">Retried <em>and</em> de-duplicated — the practical goal</div>
+        </div>
+      </div>
+
+      <!-- Topic 1 — foldable discussion -->
+      <details class="section foldable" style="margin-top:0;">
+        <summary class="fold-summary">
+          <span class="q-badge">Discuss</span>
+          <span class="q-text">
+            Two jobs fail: a CI build crashes because its VM was preempted, and
+            another fails because the code doesn't compile. Should you retry
+            <strong>either</strong>, <strong>both</strong>, or <strong>neither</strong> — and why?
+          </span>
+          <span class="fold-chevron" aria-hidden="true">▸</span>
+        </summary>
+        <div class="fold-body">
+          <h3 class="topic-fold-title"><span class="topic-num">1</span> Why do we need retries?</h3>
+          <p class="topic-lead">
+            Failures are <strong>normal, not exceptional</strong> — and which ones
+            you retry is a <strong>product decision</strong>, not just an
+            infrastructure one.
+          </p>
+          <div class="rule">
+            <span class="yes">↻ Transient infrastructure failures</span> → retry
+          </div>
+          <div class="rule">
+            <span class="no">✕ Permanent business-logic failures</span> → do not retry
+          </div>
+
+          <div class="eg">
+            <div class="eg-name">CI / CD</div>
+            <div class="eg-yes">Retry: worker crash · VM/GPU preemption</div>
+            <div class="eg-no">Don't: build compile failure · flaky unit test</div>
+          </div>
+          <div class="eg">
+            <div class="eg-name">Web crawler</div>
+            <div class="eg-yes">Retry: network timeout · HTTP 429 (rate limit)</div>
+            <div class="eg-no">Don't: invalid URL</div>
+          </div>
+          <div class="eg">
+            <div class="eg-name">GPU inference</div>
+            <div class="eg-no">Must not duplicate expensive computation</div>
+          </div>
+        </div>
+      </details>
+
+      <!-- Topic 2 — foldable discussion -->
+      <details class="section foldable">
+        <summary class="fold-summary">
+          <span class="q-badge">Discuss</span>
+          <span class="q-text">
+            A task fails. Walk through what has to happen, step by step, before a
+            <strong>different</strong> worker safely retries it. What stops a
+            poison job from retrying forever?
+          </span>
+          <span class="fold-chevron" aria-hidden="true">▸</span>
+        </summary>
+        <div class="fold-body">
+          <h3 class="topic-fold-title"><span class="topic-num">2</span> How to handle retries?</h3>
+          <p class="topic-sub">Basic retry flow</p>
+          <ol class="mini-flow">
+            <li>Worker executes task</li>
+            <li>Failure detected</li>
+            <li>Scheduler updates Job Run state</li>
+            <li>Retry policy evaluated</li>
+            <li>Task re-queued with delay / backoff</li>
+            <li>New worker retries execution</li>
+          </ol>
+          <p class="topic-sub">Retry policies</p>
+          <p class="topic-note">Immediate retry &nbsp;vs&nbsp; exponential backoff</p>
+          <p class="topic-sub">Dead-letter queue</p>
+          <p class="topic-note">Parks give-up jobs for <strong>debugging &amp; replay</strong></p>
+          <p class="topic-sub">Failure isolation</p>
+          <div class="tag-row">
+            <span class="tag">Rate limiting</span>
+            <span class="tag">Retry jitter</span>
+            <span class="tag">Priority queues</span>
+            <span class="tag">Circuit breakers</span>
+          </div>
+        </div>
+      </details>
+
+      <!-- Topic 3 — foldable discussion -->
+      <details class="section foldable">
+        <summary class="fold-summary">
+          <span class="q-badge">Discuss</span>
+          <span class="q-text">
+            A payment job ran successfully, but the worker died before its
+            <em>ack</em> reached the scheduler — so it gets retried. How do you
+            guarantee the customer is <strong>not charged twice</strong>?
+          </span>
+          <span class="fold-chevron" aria-hidden="true">▸</span>
+        </summary>
+        <div class="fold-body">
+          <h3 class="topic-fold-title"><span class="topic-num">3</span> How to support idempotency?</h3>
+          <p class="topic-lead">
+            The hard case: <em>what if the first execution actually
+            succeeded, but the acknowledgment was lost?</em> A naive retry
+            would run it twice.
+          </p>
+          <p class="topic-sub">Idempotent execution flow</p>
+          <ol class="mini-flow">
+            <li>Worker receives a retry request</li>
+            <li>Check the <strong>execution store</strong> (by idempotency key / result):
+              <ul>
+                <li><span class="yes">Already completed?</span> → return the cached result</li>
+                <li><span class="no">Otherwise</span> → execute the task</li>
+              </ul>
+            </li>
+            <li>Persist the <strong>completion marker atomically</strong></li>
+          </ol>
+        </div>
+      </details>
+
+      <!-- job_runs field reference -->
+      <h3 class="flow-title">What a <code>job_runs</code> row tracks to make this work</h3>
+      <p class="topic-note" style="margin-bottom:14px;">
+        The <span class="key-pill identity">identity</span> field gives every
+        attempt a unique ID; the <span class="key-pill lease">lease group</span>
+        lets a healthy worker safely <em>steal</em> a job from a dead one.
+      </p>
+      <div class="entity">
+        <table class="schema runs-ref">
+          <tr><th>Field</th><th>Description</th></tr>
+          <tr class="hl-identity"><td class="k">run_id</td><td class="d">Physical execution attempt ID.</td></tr>
+          <tr><td class="k">job_id</td><td class="d">Which job this run belongs to.</td></tr>
+          <tr><td class="k">run_number</td><td class="d">1, 2, 3… (attempt / order).</td></tr>
+          <tr><td class="k">status</td><td class="d">queued / running / succeeded / failed / canceled</td></tr>
+          <tr><td class="k">queued_at</td><td class="d">When the run was enqueued.</td></tr>
+          <tr><td class="k">available_at</td><td class="d">When it becomes eligible to run (backoff).</td></tr>
+          <tr class="hl-lease"><td class="k">claimed_by</td><td class="d">Worker ID that leased it.</td></tr>
+          <tr class="hl-lease"><td class="k">claimed_at</td><td class="d">Lease start.</td></tr>
+          <tr class="hl-lease"><td class="k">lease_expires_at</td><td class="d">When others may safely steal it.</td></tr>
+          <tr class="hl-lease"><td class="k">last_heartbeat_at</td><td class="d">Last heartbeat from the worker — used to detect dead or stalled workers.</td></tr>
+          <tr><td class="k">started_at</td><td class="d">Execution start.</td></tr>
+          <tr><td class="k">finished_at</td><td class="d">Execution end.</td></tr>
+          <tr><td class="k">error_code</td><td class="d">Categorical failure reason.</td></tr>
+          <tr><td class="k">error_message</td><td class="d">Debuggable failure info.</td></tr>
+        </table>
+      </div>
+    </section>
+
+    <!-- ============ CHAPTER 3 ============ -->
+    <header class="chapter">
+      <div class="chapter-kicker">Part 3</div>
+      <div class="chapter-name">Fairness Across Tenants</div>
+      <p class="chapter-desc">
+        In a multi-tenant system, one tenant can overload the platform and
+        starve everyone else. Fairness keeps the cluster shared.
+      </p>
+    </header>
+
+    <!-- ============ FAIRNESS ============ -->
+    <section class="section" style="margin-top:0;">
+      <div class="topic-grid">
+        <!-- Topic 1 -->
+        <article class="topic">
+          <h3><span class="topic-num">1</span> What is the problem?</h3>
+          <p class="topic-lead">
+            In a multi-tenant job-scheduling system, one tenant may submit
+            <strong>too many jobs</strong> and consume the
+            <strong>entire cluster</strong> — leaving everyone else waiting.
+          </p>
+        </article>
+
+        <!-- Topic 2 -->
+        <article class="topic">
+          <h3><span class="topic-num">2</span> How to achieve fairness?</h3>
+          <ol class="mini-flow">
+            <li>Per-tenant queues</li>
+            <li>Tenant quotas</li>
+            <li>Weighted fair scheduling (priority queue)</li>
+          </ol>
+
+          <p class="topic-sub">Example · CI/CD</p>
+          <div class="eg">
+            <div class="eg-name">Burst vs. urgent</div>
+            <div class="eg-line">Tenant A submits 100,000 builds after a large monorepo merge.</div>
+            <div class="eg-line">Tenant B submits 10 urgent production hotfix builds.</div>
+            <div class="eg-line note">Per-tenant queues: if Tenant B only needs 5 workers, Tenant A can <strong>borrow</strong> the unused capacity — but when B submits urgent builds, the system <strong>gives capacity back</strong>.</div>
+          </div>
+
+          <p class="topic-sub">Example · Push notifications</p>
+          <div class="eg">
+            <div class="eg-name">Marketing vs. transactional</div>
+            <div class="eg-line">Tenant A launches a marketing campaign to 50M users.</div>
+            <div class="eg-line">Tenant B needs to send password-reset notifications.</div>
+            <div class="eg-line">Tenant C needs to send security alerts.</div>
+            <div class="eg-line note">Separate queues by notification type, then apply priority + fairness: marketing can use spare capacity but must <strong>not starve</strong> transactional or security messages.</div>
+          </div>
+        </article>
+
+        <!-- Topic 3 -->
+        <article class="topic">
+          <h3><span class="topic-num">3</span> Handling GPU fairness</h3>
+          <ol class="mini-flow">
+            <li>Per-tenant queues</li>
+            <li>Tenant quotas</li>
+            <li>Weighted fair scheduling</li>
+          </ol>
+          <div class="topic-callout">
+            <strong>Important — work-conserving scheduling:</strong>
+            fairness should <em>never</em> waste capacity. If a fair share goes
+            unused, let another tenant borrow it rather than letting GPUs sit idle.
+          </div>
+        </article>
+      </div>
+    </section>
+
+    <!-- ============ CHAPTER 4 ============ -->
+    <header class="chapter">
+      <div class="chapter-kicker">Part 4</div>
+      <div class="chapter-name">Long-Running Workflows</div>
+      <p class="chapter-desc">
+        Durable state and resumable execution — so an hours-long job that dies
+        at 90% doesn't have to start over.
+      </p>
+    </header>
+
+    <!-- ============ LONG-RUNNING ============ -->
+    <section class="section" style="margin-top:0;">
+      <div class="topic-grid two">
+        <!-- Topic 1 -->
+        <article class="topic">
+          <h3><span class="topic-num">1</span> Heartbeat-based fault detection</h3>
+          <p class="topic-lead">
+            Workers can crash from machine failures, power loss, or network
+            partitions. Without detection, a task can stay stuck in
+            <code>RUNNING</code> <strong>forever</strong>.
+          </p>
+          <p class="topic-sub">Solution</p>
+          <ul class="check-list">
+            <li>Workers send <strong>periodic heartbeats</strong> while executing</li>
+            <li>Scheduler monitors the <strong>heartbeat timeout</strong></li>
+            <li>Missing heartbeat → worker assumed <strong>dead</strong></li>
+            <li>Task becomes <strong>eligible for retry</strong> on another worker</li>
+          </ul>
+
+          <div class="hb">
+            <span class="hb-box">Worker</span>
+            <span class="hb-loop">⟳ heartbeat every N s →</span>
+            <span class="hb-box">Scheduler</span>
+          </div>
+          <p class="topic-note">
+            Tracked by <span class="key-pill lease">last_heartbeat_at</span> on
+            the <code>job_runs</code> row — the timestamp the scheduler watches
+            to detect dead or stalled workers.
+          </p>
+        </article>
+
+        <!-- Topic 2 -->
+        <article class="topic">
+          <h3><span class="topic-num">2</span> Checkpointing for long tasks</h3>
+          <p class="topic-lead">
+            Some tasks run for hours — exporting millions of records, processing
+            a massive video, training a model. Failing at 90% and restarting
+            from zero wastes <strong>enormous time and compute</strong>.
+          </p>
+
+          <p class="topic-sub">Checkpoint by progress</p>
+          <div class="chain">
+            <span class="chain-box">10%</span><span class="chain-arrow">→</span>
+            <span class="chain-box">20%</span><span class="chain-arrow">→</span>
+            <span class="chain-box">30%</span><span class="chain-arrow">→</span>
+            <span class="chain-box">40%</span>
+          </div>
+          <p class="topic-sub">Checkpoint by stage</p>
+          <div class="chain">
+            <span class="chain-box">Map</span><span class="chain-arrow">→</span>
+            <span class="chain-box ckpt">reduce</span><span class="chain-arrow">→</span>
+            <span class="chain-box">map</span><span class="chain-arrow">→</span>
+            <span class="chain-box">reduce</span>
+          </div>
+          <p class="topic-note" style="margin-top:8px;">
+            At each ✓ checkpoint, <strong>store the intermediate result</strong>
+            to durable storage.
+          </p>
+
+          <p class="topic-sub">How it works</p>
+          <ul class="check-list">
+            <li>Break the task into smaller <strong>stages or chunks</strong></li>
+            <li>After each chunk, save progress to <strong>durable storage</strong></li>
+            <li>On failure, restart from the <strong>latest checkpoint</strong>, not the beginning</li>
+            <li>A new worker loads the checkpoint and continues from the last good point</li>
+          </ul>
+
+          <p class="topic-sub">Examples</p>
+          <div class="eg">
+            <div class="eg-line"><strong>CI/CD:</strong> resume from the last deployed service / cluster shard instead of redeploying the whole fleet</div>
+            <div class="eg-line"><strong>Data pipeline:</strong> resume from the last processed partition, checkpoint, or Kafka offset</div>
+            <div class="eg-line"><strong>Sora / AI video:</strong> resume from completed scenes, frame ranges, or rendering stages</div>
+          </div>
+        </article>
+      </div>
+
+      <!-- Animation: heartbeat detection -> failover -->
+      <figure class="anim heartbeat" data-step="0" data-steps="5" aria-label="Animated heartbeat fault detection and failover">
+        <div class="anim-title">▶ Heartbeat detection &amp; failover</div>
+        <div class="anim-stage hb-stage">
+          <div class="a-box hb-w" data-n="a">Worker A</div>
+          <div class="a-box hb-w" data-n="b">Worker B</div>
+          <div class="a-box hb-sch">Scheduler<span class="hb-timeout"><span class="hb-tbar"></span></span></div>
+          <span class="hb-pulse from-a"></span>
+          <span class="hb-pulse from-b"></span>
+          <div class="a-token hb-job">JOB</div>
+        </div>
+        <p class="anim-caption" data-cap="0"><span class="hl">Worker A</span> runs the job, sending a heartbeat every few seconds. Each one updates <code>last_heartbeat_at</code>, resetting the scheduler's timeout.</p>
+        <p class="anim-caption" data-cap="1"><span class="bad">Worker A crashes</span> (machine failure, power loss, network partition) — the heartbeats stop.</p>
+        <p class="anim-caption" data-cap="2">The scheduler sees no heartbeat; the <span class="hl">timeout window</span> starts filling.</p>
+        <p class="anim-caption" data-cap="3">Timeout exceeded → Worker A is <span class="bad">assumed dead</span>, and its job run becomes eligible for retry.</p>
+        <p class="anim-caption" data-cap="4">A healthy <span class="good">Worker B</span> leases the run and resumes — heartbeats flow again.</p>
+        <div class="anim-controls">
+          <button type="button" data-act="toggle">▶ Play</button>
+          <button type="button" data-act="step">⏭ Step</button>
+          <button type="button" data-act="replay">↻ Replay</button>
+        </div>
+      </figure>
+
+      <!-- Animation: checkpoint & resume -->
+      <figure class="anim checkpoint" data-step="0" data-steps="6" aria-label="Animated checkpointing and resume after a crash">
+        <div class="anim-title">▶ Checkpoint &amp; resume after a crash</div>
+        <div class="anim-stage ck-stage">
+          <div class="ck-track">
+            <span class="ck-fill"></span>
+            <span class="ck-tick" data-cp="25" style="left:25%"></span>
+            <span class="ck-tick" data-cp="50" style="left:50%"></span>
+            <span class="ck-tick" data-cp="75" style="left:75%"></span>
+          </div>
+          <span class="ck-crash">💥</span>
+        </div>
+        <p class="anim-caption" data-cap="0">A long task starts from 0%.</p>
+        <p class="anim-caption" data-cap="1">It reaches ~30%. The last <span class="good">checkpoint at 25%</span> is saved to durable storage.</p>
+        <p class="anim-caption" data-cap="2">It reaches ~70%. Another <span class="good">checkpoint at 50%</span> is saved.</p>
+        <p class="anim-caption" data-cap="3"><span class="bad">💥 The worker crashes at 70%.</span></p>
+        <p class="anim-caption" data-cap="4">It <span class="good">resumes from the last checkpoint (50%)</span> — not from zero. Only ~20% is redone instead of losing all 70%.</p>
+        <p class="anim-caption" data-cap="5">A new worker continues to <span class="good">100%</span> and completes.</p>
+        <div class="anim-controls">
+          <button type="button" data-act="toggle">▶ Play</button>
+          <button type="button" data-act="step">⏭ Step</button>
+          <button type="button" data-act="replay">↻ Replay</button>
+        </div>
+      </figure>
+    </section>
+
+    <!-- ============ CHAPTER 5 ============ -->
+    <header class="chapter">
+      <div class="chapter-kicker">Part 5</div>
+      <div class="chapter-name">Applying Job Scheduling</div>
+      <p class="chapter-desc">
+        The same building blocks — triggers, queues, retries, idempotency,
+        fairness, and checkpointing — recombine to solve every use case from the
+        top of this page.
+      </p>
+    </header>
+
+    <!-- ============ APPLY ============ -->
+    <section class="section" style="margin-top:0;">
+      <div class="apply-grid">
+
+        <!-- CI/CD -->
+        <article class="apply-card">
+          <div class="apply-head"><span class="uc-co">OpenAI</span> CI/CD — GitHub Actions</div>
+          <div class="tag-row">
+            <span class="tag">Event trigger</span><span class="tag">DAG</span>
+            <span class="tag">Per-tenant queues</span><span class="tag">Selective retry</span>
+            <span class="tag">Checkpoint by stage</span>
+          </div>
+          <ul class="apply-list">
+            <li>A push / PR <strong>event</strong> triggers a build → test → deploy <strong>DAG</strong>.</li>
+            <li><strong>Retry</strong> worker crashes &amp; VM preemption; <span class="no">never</span> retry compile or flaky-test failures.</li>
+            <li>Per-repo / per-org <strong>fair queues</strong> stop one team's 100k builds from starving urgent hotfixes.</li>
+            <li>Deploys <strong>checkpoint by shard</strong> — resume from the last deployed service, not the whole fleet.</li>
+          </ul>
+        </article>
+
+        <!-- Sora -->
+        <article class="apply-card">
+          <div class="apply-head"><span class="uc-co">OpenAI</span> Design Sora — AI video</div>
+          <div class="tag-row">
+            <span class="tag">API trigger</span><span class="tag">Long-running GPU</span>
+            <span class="tag">Checkpointing</span><span class="tag">GPU fairness</span>
+            <span class="tag">Idempotency</span>
+          </div>
+          <ul class="apply-list">
+            <li>An <strong>API</strong> request enqueues an hours-long GPU render job.</li>
+            <li><strong>Checkpoint</strong> per scene / frame range — a crash resumes from the last finished segment.</li>
+            <li><strong>Work-conserving GPU fairness</strong> shares idle accelerators without starving anyone.</li>
+            <li><strong>Idempotency key</strong> guarantees the expensive compute never runs twice.</li>
+          </ul>
+        </article>
+
+        <!-- Crossword -->
+        <article class="apply-card">
+          <div class="apply-head"><span class="uc-co">OpenAI</span> Crossword Puzzle</div>
+          <div class="tag-row">
+            <span class="tag">Cron trigger</span><span class="tag">Recurring</span>
+            <span class="tag">Delayed run</span><span class="tag">Idempotency</span>
+          </div>
+          <ul class="apply-list">
+            <li>A <strong>cron</strong> schedule (e.g. <code>0 0 * * *</code>) spawns one puzzle <strong>run per day</strong>.</li>
+            <li><strong>Idempotency key = date</strong> → exactly one puzzle, even if the scheduler fires twice.</li>
+            <li>Low priority &amp; freely retriable — generated well ahead of publish time.</li>
+          </ul>
+        </article>
+
+        <!-- Model deployment -->
+        <article class="apply-card">
+          <div class="apply-head"><span class="uc-co">Anthropic</span> Distributed Model Deployment</div>
+          <div class="tag-row">
+            <span class="tag">API trigger</span><span class="tag">DAG / fan-out</span>
+            <span class="tag">Heartbeats</span><span class="tag">Checkpoint by stage</span>
+            <span class="tag">At-least-once</span>
+          </div>
+          <ul class="apply-list">
+            <li>A rollout is a <strong>DAG fanning out</strong> across many nodes &amp; regions.</li>
+            <li><strong>Heartbeats</strong> detect a stuck node so its shard is re-tried elsewhere.</li>
+            <li><strong>Checkpoint by stage</strong> resumes from the last deployed shard — no full re-deploy.</li>
+            <li><strong>Idempotent</strong> steps make at-least-once safe (never double-deploy a weight shard).</li>
+          </ul>
+        </article>
+
+        <!-- Web crawler -->
+        <article class="apply-card">
+          <div class="apply-head"><span class="uc-co">Meta</span> Web Crawler</div>
+          <div class="tag-row">
+            <span class="tag">Scheduled + event</span><span class="tag">Priority queues</span>
+            <span class="tag">Selective retry</span><span class="tag">Rate limit + jitter</span>
+            <span class="tag">Dedup</span>
+          </div>
+          <ul class="apply-list">
+            <li>Massive <strong>fan-out</strong> of fetch jobs across <strong>priority queues</strong>.</li>
+            <li><strong>Retry</strong> network timeouts &amp; HTTP 429; <span class="no">don't</span> retry invalid URLs.</li>
+            <li><strong>Rate limiting + retry jitter</strong> keep crawls polite and avoid thundering herds.</li>
+            <li>URL <strong>idempotency keys</strong> dedupe so the same page isn't crawled twice.</li>
+          </ul>
+        </article>
+
+        <!-- Webhook -->
+        <article class="apply-card">
+          <div class="apply-head"><span class="uc-co">Stripe</span> Webhook Delivery</div>
+          <div class="tag-row">
+            <span class="tag">Event trigger</span><span class="tag">At-least-once</span>
+            <span class="tag">Exponential backoff</span><span class="tag">DLQ</span>
+            <span class="tag">Per-tenant fairness</span>
+          </div>
+          <ul class="apply-list">
+            <li>Each event enqueues a delivery job with <strong>at-least-once</strong> guarantees.</li>
+            <li>Failed deliveries <strong>retry with exponential backoff</strong>; exhausted ones land in a <strong>DLQ</strong>.</li>
+            <li>An <strong>idempotency key</strong> in the payload lets the receiver dedupe replays.</li>
+            <li><strong>Per-merchant queues</strong> stop one busy account from delaying everyone's webhooks.</li>
+          </ul>
+        </article>
+
+        <!-- Delayed payment -->
+        <article class="apply-card">
+          <div class="apply-head"><span class="uc-co">Roblox</span> Delayed Payment</div>
+          <div class="tag-row">
+            <span class="tag">Delayed / run-at</span><span class="tag">Durable store</span>
+            <span class="tag">Exactly-once</span><span class="tag">Selective retry</span>
+          </div>
+          <ul class="apply-list">
+            <li>A <strong>run-at timestamp</strong> schedules the payout for a future time.</li>
+            <li>The <strong>metadata store is the source of truth</strong> — survives restarts, never lost in the queue.</li>
+            <li><strong>Idempotency / exactly-once</strong> ensures a payee is <span class="no">never double-charged</span>.</li>
+            <li><strong>Retry</strong> transient gateway errors; route hard declines to review, not blind retry.</li>
+          </ul>
+        </article>
+
+      </div>
+    </section>
+  </main>
+
+  <footer class="page-footer">
+    <p>
+      Illustration of the job-scheduling design pattern · inspired by
+      <a href="https://www.showoffer.io/learn/system-design/design-patterns/job-scheduling">showoffer.io</a>
+    </p>
+  </footer>
+
+  <script src="anim.js" defer></script>
+</body>
+</html>
